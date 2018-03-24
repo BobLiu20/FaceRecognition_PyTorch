@@ -35,6 +35,9 @@ def train(prefix, **arg_dict):
     model_params["class_num"] = arg_dict["label_num"]
     net =  models.init(arg_dict["model"], model_params=model_params)
     print (net)
+    if gpu_num > 1:
+        print ("Training with {} gpus".format(gpu_num))
+        net = nn.DataParallel(net)
     net.cuda()
     if arg_dict["restore_ckpt"]:
         print ("Resotre ckpt from {}".format(arg_dict["restore_ckpt"]))
@@ -62,8 +65,9 @@ def train(prefix, **arg_dict):
         optimizer.zero_grad()
         datas, labels = Variable(datas, requires_grad=False), Variable(labels, requires_grad=False)
         loss = net(datas, labels)
-        lossd = loss.data[0]
+        loss = loss.mean()
         loss.backward()
+        lossd = loss.data[0]
         optimizer.step()
         #  display
         loss_list.append(lossd)

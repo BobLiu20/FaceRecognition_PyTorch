@@ -104,7 +104,7 @@ class SphereFaceNet(nn.Module):
         self.main_net = self.__main_net(layer_type, self.feature_dim, image_size)
 
         self.margin_fc = MarginInnerProduct(model_params)
-        self.ce_loss = nn.CrossEntropyLoss()
+        self.ce_loss = nn.CrossEntropyLoss(reduce=False)
 
     def forward(self, x, label):
         x = self.main_net(x)
