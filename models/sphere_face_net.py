@@ -39,8 +39,8 @@ class MarginInnerProduct(nn.Module):
         w.data[:] = w_norm.data
         #  cos_theta = x'w/|x|
         x_norm = x.norm(p=2, dim=1)
-        cos_theta = x.mm(w)
-        cos_theta = cos_theta / x_norm.view(-1, 1)
+        output = x.mm(w)
+        cos_theta = output / x_norm.view(-1, 1)
         cos_theta = cos_theta.clamp(-1, 1)
         #  cos_m_theta = cos(m * theta)
         cos_m_theta = self.margin_cos[self.margin](cos_theta)
@@ -52,16 +52,15 @@ class MarginInnerProduct(nn.Module):
         x_norm_phi_theta = x_norm.view(-1, 1) * phi_theta
         x_norm_cos_theta = x_norm.view(-1, 1) * cos_theta
         #  i=j index
-        index = cos_theta.data * 0.0
+        index = x_norm_cos_theta.data * 0.0
         index.scatter_(1, label.data.view(-1, 1), 1)
-        index = index.byte()
+        # index = index.byte()
         index = Variable(index)
         #  output
         lamb = self.__get_lambda()
-        output = cos_theta * 1.0
-        output[index] -= cos_theta[index] / (1 + lamb)
-        output[index] += phi_theta[index] / (1 + lamb)
-        return output
+        output2 = output * (1.0 - index) + x_norm_phi_theta * index
+        output3 = (output2 + lamb * output) / (1 + lamb)
+        return output3
 
     def __get_lambda(self):
         self.lamb_iter += 1
