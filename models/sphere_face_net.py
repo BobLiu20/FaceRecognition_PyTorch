@@ -36,7 +36,7 @@ class MarginInnerProduct(nn.Module):
         #  weight normalize
         w = self.weight
         w_norm = F.normalize(w, dim=1)
-        w.data[:] = w_norm.data
+        # w.data[:] = w_norm.data
         #  cos_theta = x'w/|x|
         x_norm = x.norm(p=2, dim=1)
         output = x.mm(w)
