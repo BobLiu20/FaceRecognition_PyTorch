@@ -29,7 +29,7 @@ class MarginInnerProduct(nn.Module):
             lambda x: 16 * x**5 - 20 * x**3 + 5 * x
         ]
         #  training parameter
-        self.weight = Parameter(torch.Tensor(self.in_units, self.out_units))
+        self.weight = Parameter(torch.Tensor(self.out_units, self.in_units))
         self.weight.data.uniform_(-1, 1).renorm_(2, 1, 1e-5).mul_(1e5)
 
     def forward(self, x, label):
@@ -39,8 +39,8 @@ class MarginInnerProduct(nn.Module):
         # w.data[:] = w_norm.data
         #  cos_theta = x'w/|x|
         x_norm = x.norm(p=2, dim=1)
-        output = x.mm(w)
-        cos_theta = output / x_norm.view(-1, 1)
+        cos_theta = x.mm(w_norm.t())
+        cos_theta = cos_theta / x_norm.view(-1, 1)
         cos_theta = cos_theta.clamp(-1, 1)
         #  cos_m_theta = cos(m * theta)
         cos_m_theta = self.margin_cos[self.margin](cos_theta)
@@ -54,13 +54,14 @@ class MarginInnerProduct(nn.Module):
         #  i=j index
         index = x_norm_cos_theta.data * 0.0
         index.scatter_(1, label.data.view(-1, 1), 1)
-        # index = index.byte()
+        index = index.byte()
         index = Variable(index)
         #  output
         lamb = self.__get_lambda()
-        output2 = output * (1.0 - index) + x_norm_phi_theta * index
-        output3 = (output2 + lamb * output) / (1 + lamb)
-        return output3
+        output = x_norm_cos_theta * 1.0  # size=(B,Classnum)
+        output[index] -= x_norm_cos_theta[index] / (1 + lamb)
+        output[index] += x_norm_phi_theta[index] / (1 + lamb)
+        return output
 
     def __get_lambda(self):
         self.lamb_iter += 1
@@ -145,7 +146,8 @@ class SphereFaceNet(nn.Module):
 if __name__ == "__main__":
     params = {"in_units": 4, "out_units": 6,
               "lamb_iter": 0, "lamb_base": 1000,
-              "lamb_gamma": 0.0001, "lamb_power": 1, "lamb_min": 10}
+              "lamb_gamma": 0.0001, "lamb_power": 1, "lamb_min": 10,
+              "class_num": 6, "feature_dim": 4}
     test = MarginInnerProduct(params)
 
     x = Variable(torch.ones(2, 4).float())
