@@ -1,6 +1,7 @@
 import sys
 
 from sphere_face_net import SphereFaceNet
+from sphere_face_net_parallel import SphereFaceNetParallel
 
 # init
 def init(model, **kwargs):

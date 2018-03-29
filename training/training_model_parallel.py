@@ -22,12 +22,13 @@ import models
 def train(prefix, **arg_dict):
     img_size = arg_dict['img_size']
     gpu_num = len(arg_dict["gpu_device"].split(','))
-    batch_size = arg_dict['batch_size'] * gpu_num
-    arg_dict['batch_size'] = batch_size
-    print ("real batch_size = %d for gpu_num = %d" % (batch_size, gpu_num))
-    print ("Working on data parallel.")
-    if arg_dict["model"].endswith("Parallel"):
-        raise Exception("Unsupport model name endswith Parallel.")
+    batch_size = arg_dict["batch_size"]
+    print ("batch_size = %d for gpu_num = %d" % (batch_size, gpu_num))
+    print ("Working on model parallel.")
+    if gpu_num <= 1:
+        raise Exception("Only support more than 2 gpu number")
+    if not arg_dict["model"].endswith("Parallel"):
+        raise Exception("Only support model name endswith Parallel.")
     # batch generator
     _batch_reader = BatchReader(**arg_dict)
     _batch_generator = _batch_reader.batch_generator()
@@ -36,19 +37,15 @@ def train(prefix, **arg_dict):
     model_params["image_size"] = arg_dict["img_size"]
     model_params["feature_dim"] = arg_dict["feature_dim"]
     model_params["class_num"] = arg_dict["label_num"]
-    net =  models.init(arg_dict["model"], model_params=model_params)
+    net =  models.init(arg_dict["model"], gpu_num=gpu_num, model_params=model_params)
     print (net)
-    if gpu_num > 1:
-        print ("Training with {} gpus".format(gpu_num))
-        net = nn.DataParallel(net)
-    net.cuda()
     if arg_dict["restore_ckpt"]:
         print ("Resotre ckpt from {}".format(arg_dict["restore_ckpt"]))
         net.load_state_dict(torch.load(arg_dict["restore_ckpt"]))
     # optimizer
     optimizer = optim.SGD(net.parameters(), lr=arg_dict['learning_rate'],
                           momentum=0.9, weight_decay=5e-4)
-    lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=500000, gamma=0.95)
+    lr_scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=20000, gamma=0.95)
     # start loop
     print ("Start to training...")
     start_time = time.time()
@@ -66,7 +63,7 @@ def train(prefix, **arg_dict):
         labels = torch.from_numpy(batch[1]).long().cuda()
         #  forward and backward
         optimizer.zero_grad()
-        datas, labels = Variable(datas, requires_grad=False), Variable(labels, requires_grad=False)
+        datas, labels = Variable(datas), Variable(labels, requires_grad=False)
         loss = net(datas, labels)
         loss = loss.mean()
         loss.backward()
