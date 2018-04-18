@@ -13,7 +13,7 @@ class MarginInnerProduct(nn.Module):
         self.in_units = margin_params.get("feature_dim", 512)
         self.out_units = margin_params["class_num"]
         #  lambda parameter
-        self.lamb_iter = margin_params.get("lamb_iter", 0)
+        self.lamb_iter = [margin_params.get("lamb_iter", 0)]
         self.lamb_base = margin_params.get("lamb_base", 1500)
         self.lamb_gamma = margin_params.get("lamb_gamma", 0.01)
         self.lamb_power = margin_params.get("lamb_power", 1)
@@ -64,10 +64,10 @@ class MarginInnerProduct(nn.Module):
         return output
 
     def __get_lambda(self):
-        self.lamb_iter += 1
-        val = self.lamb_base * (1.0 + self.lamb_gamma * self.lamb_iter) ** (-self.lamb_power)
+        self.lamb_iter[0] += 1
+        val = self.lamb_base * (1.0 + self.lamb_gamma * self.lamb_iter[0]) ** (-self.lamb_power)
         val = max(self.lamb_min, val)
-        if self.lamb_iter % 500 == 0:
+        if self.lamb_iter[0] % 500 == 0:
             print ("Now lambda = {}".format(val))
         return val
 
