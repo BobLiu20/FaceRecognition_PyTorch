@@ -109,6 +109,12 @@ class BatchReader():
             for sample in sample_list:
                 # preprocess
                 image = cv2.imread(sample[0])
+                if image is None:
+                    print ("Bad image: {}".format(sample[0]))
+                    print ("Batch reader exit now.")
+                    global exitEvent
+                    exitEvent.set()
+                    sys.exit()
                 image = cv2.resize(image, (self._img_size, self._img_size))
                 if np.random.randint(0, 2) == 0:
                     image = np.fliplr(image)

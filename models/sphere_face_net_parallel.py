@@ -8,15 +8,15 @@ import copy
 
 
 class MarginInnerProduct(nn.Module):
-    def __init__(self, margin_params, **kwargs):
+    def __init__(self, margin_params, common_dict, **kwargs):
         super(MarginInnerProduct, self).__init__()
+        self.common_dict = common_dict
         #  args
         self.in_units = margin_params.get("feature_dim", 512)
         self.out_units = margin_params["class_num"]
         self.start_label = margin_params["start_label"]
         self.end_label = margin_params["end_label"]
         #  lambda parameter
-        self.lamb_iter = [margin_params.get("lamb_iter", 0)]
         self.lamb_base = margin_params.get("lamb_base", 1500)
         self.lamb_gamma = margin_params.get("lamb_gamma", 0.01)
         self.lamb_power = margin_params.get("lamb_power", 1)
@@ -70,15 +70,23 @@ class MarginInnerProduct(nn.Module):
         # output[index] += x_norm_phi_theta[index] / (1 + lamb)
         output = output - x_norm_cos_theta * index / (1 + lamb)
         output = output + x_norm_phi_theta * index / (1 + lamb)
+        #  write tensorboard summary
+        self.__write_summary(lamb)
         return output
 
     def __get_lambda(self):
-        self.lamb_iter[0] += 1
-        val = self.lamb_base * (1.0 + self.lamb_gamma * self.lamb_iter[0]) ** (-self.lamb_power)
+        val = self.lamb_base * (1.0 + self.lamb_gamma * 
+                                self.common_dict["global_step"]) ** (-self.lamb_power)
         val = max(self.lamb_min, val)
-        if self.lamb_iter[0] % 500 == 0:
+        if self.common_dict["global_step"] % 500 == 0 and self.start_label == 0:
             print ("Now lambda = {}".format(val))
         return val
+
+    def __write_summary(self, lamb):
+        if self.common_dict["global_step"] % 10 == 0 and self.common_dict["tensorboard_writer"]:
+            self.common_dict["tensorboard_writer"].add_scalar("lambda_{}".format(self.start_label),
+                                                              lamb,
+                                                              self.common_dict["global_step"])
 
 
 class CNNResidualBlock(nn.Module):
@@ -103,7 +111,7 @@ class CNNResidualBlock(nn.Module):
 
 
 class SphereFaceNetParallel(nn.Module):
-    def __init__(self, gpu_num, model_params={}):
+    def __init__(self, gpu_num, model_params={}, common_dict={}):
         super(SphereFaceNetParallel, self).__init__()
         self.feature_dim = model_params.get("feature_dim", 512)
         self.class_num = model_params["class_num"]
@@ -125,7 +133,8 @@ class SphereFaceNetParallel(nn.Module):
             _model_params["class_num"] = _class_num
             _model_params["start_label"] = start_index
             _model_params["end_label"] = start_index + _class_num
-            self.margin_fc_chunks.append(MarginInnerProduct(_model_params).cuda(i))
+            self.margin_fc_chunks.append(MarginInnerProduct(_model_params, common_dict).cuda(i))
+            start_index += _class_num
 
         self.ce_loss = nn.DataParallel(nn.CrossEntropyLoss(reduce=False))
         self.ce_loss.cuda()
