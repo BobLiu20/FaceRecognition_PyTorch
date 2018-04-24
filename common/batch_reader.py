@@ -7,7 +7,10 @@ import math
 import signal
 import random
 import time
-from multiprocessing import Process, Queue, Event
+#  using torch multiprocessing instead of python
+import torch
+from torch.multiprocessing import Process, Queue, Event
+from torch.autograd import Variable
 
 exitEvent = Event() # for noitfy all process exit.
 
@@ -16,6 +19,15 @@ def handler(sig_num, stack_frame):
     exitEvent.set()
 signal.signal(signal.SIGINT, handler)
 
+def preprocess_func(batch):
+    datas = np.asarray(batch[0], dtype=float)
+    datas = torch.from_numpy(datas).float()
+    datas = datas.permute(0, 3, 1, 2)
+    datas -= 127.5
+    datas *= 0.0078125
+    labels = torch.from_numpy(batch[1]).long()
+    return Variable(datas, requires_grad=False), Variable(labels, requires_grad=False)
+
 class BatchReader():
     def __init__(self, **kwargs):
         # param
@@ -23,6 +35,7 @@ class BatchReader():
         self._batch_size = kwargs['batch_size']
         self._process_num = kwargs['process_num']
         self._img_size = kwargs['img_size']
+        self._debug = kwargs['debug']
         # total lsit
         self._sample_list = [] # each item: (filepath, landmarks, ...)
         self._total_sample = 0
@@ -30,7 +43,7 @@ class BatchReader():
         self._process_list = []
         self._output_queue = []
         for i in range(self._process_num):
-            self._output_queue.append(Queue(maxsize=3)) # for each process
+            self._output_queue.append(Queue(maxsize=1)) # for each process
         # epoch
         self._idx_in_epoch = 0
         self._curr_epoch = 0
@@ -87,8 +100,13 @@ class BatchReader():
         print ("loading data set...")
         if type(input_paths) in [str, unicode]:
             input_paths = [input_paths]
+        count = 0
         for input_path in input_paths:
             for line in open(input_path):
+                if self._debug:
+                    if count > 10000:
+                        break
+                    count += 1
                 # parse line
                 idx = line.rfind(' ')
                 _path = line[:idx]
@@ -124,6 +142,7 @@ class BatchReader():
                 label_list.append(sample[1])
                 if sample_cnt >= self._kwargs['batch_size']:
                     datas = (np.array(image_list), np.array(label_list))
+                    datas = preprocess_func(datas)
                     self._output_queue[idx].put(datas)
                     sample_cnt = 0
                     image_list, label_list = [], []
