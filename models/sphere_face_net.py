@@ -4,16 +4,20 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from torch.nn import Parameter
 import math
+import copy
 
 
 class MarginInnerProduct(nn.Module):
-    def __init__(self, margin_params, **kwargs):
+    def __init__(self, margin_params, parallel_mode, common_dict, **kwargs):
         super(MarginInnerProduct, self).__init__()
+        self.common_dict = common_dict
+        self.parallel_mode = parallel_mode
         #  args
         self.in_units = margin_params.get("feature_dim", 512)
         self.out_units = margin_params["class_num"]
+        self.start_label = margin_params.get("start_label", 0)
+        self.end_label = margin_params.get("end_label", 0)
         #  lambda parameter
-        self.lamb_iter = [margin_params.get("lamb_iter", 0)]
         self.lamb_base = margin_params.get("lamb_base", 1500)
         self.lamb_gamma = margin_params.get("lamb_gamma", 0.01)
         self.lamb_power = margin_params.get("lamb_power", 1)
@@ -38,8 +42,8 @@ class MarginInnerProduct(nn.Module):
         w_norm = F.normalize(w, dim=1)
         # w.data[:] = w_norm.data
         #  cos_theta = x'w/|x|
-        x_norm = x.norm(p=2, dim=1)
-        cos_theta = x.mm(w_norm.t())
+        x_norm = x.norm(p=2, dim=1) #  [batch, 1]
+        cos_theta = x.mm(w_norm.t()) #  [batch, out]
         cos_theta = cos_theta / x_norm.view(-1, 1)
         cos_theta = cos_theta.clamp(-1, 1)
         #  cos_m_theta = cos(m * theta)
@@ -53,23 +57,47 @@ class MarginInnerProduct(nn.Module):
         x_norm_cos_theta = x_norm.view(-1, 1) * cos_theta
         #  i=j index
         index = x_norm_cos_theta.data * 0.0
-        index.scatter_(1, label.data.view(-1, 1), 1)
-        index = index.byte()
+        if self.parallel_mode == "DataParallel":
+            index.scatter_(1, label.data.view(-1, 1), 1)
+            index = index.byte()
+        elif self.parallel_mode == "ModelParallel":
+            for i in range(label.size()[0]):
+                label_val = int(label.data[i])
+                if self.start_label <= label_val < self.end_label:
+                    index[i][label_val-self.start_label] = 1
         index = Variable(index)
         #  output
         lamb = self.__get_lambda()
         output = x_norm_cos_theta * 1.0  # size=(B,Classnum)
-        output[index] -= x_norm_cos_theta[index] / (1 + lamb)
-        output[index] += x_norm_phi_theta[index] / (1 + lamb)
+        if self.parallel_mode == "DataParallel":
+            output[index] -= x_norm_cos_theta[index] / (1 + lamb)
+            output[index] += x_norm_phi_theta[index] / (1 + lamb)
+            theta_mean = theta[index].mean()
+        elif self.parallel_mode == "ModelParallel":
+            output = output - x_norm_cos_theta * index / (1 + lamb)
+            output = output + x_norm_phi_theta * index / (1 + lamb)
+            theta_mean = 0.0
+        #  write tensorboard summary
+        self.__write_summary(lamb, theta_mean)
         return output
 
     def __get_lambda(self):
-        self.lamb_iter[0] += 1
-        val = self.lamb_base * (1.0 + self.lamb_gamma * self.lamb_iter[0]) ** (-self.lamb_power)
+        val = self.lamb_base * (1.0 + self.lamb_gamma * 
+                                self.common_dict["global_step"]) ** (-self.lamb_power)
         val = max(self.lamb_min, val)
-        if self.lamb_iter[0] % 500 == 0:
+        if self.common_dict["global_step"] % 500 == 0 and torch.cuda.current_device() == 0:
             print ("Now lambda = {}".format(val))
         return val
+
+    def __write_summary(self, lamb, theta_mean):
+        current_index = torch.cuda.current_device()
+        if self.common_dict["global_step"] % 10 == 0 and self.common_dict["tensorboard_writer"]:
+            self.common_dict["tensorboard_writer"].add_scalar("lambda_{}".format(current_index),
+                                                              lamb,
+                                                              self.common_dict["global_step"])
+            self.common_dict["tensorboard_writer"].add_scalar("theta_mean_{}".format(current_index),
+                                                              theta_mean,
+                                                              self.common_dict["global_step"])
 
 
 class CNNResidualBlock(nn.Module):
@@ -94,21 +122,51 @@ class CNNResidualBlock(nn.Module):
 
 
 class SphereFaceNet(nn.Module):
-    def __init__(self, model_params={}):
+    def __init__(self, gpu_num, model_params={}, parallel_mode="DataParallel", common_dict={}):
         super(SphereFaceNet, self).__init__()
-        self.class_num = model_params["class_num"]
         self.feature_dim = model_params.get("feature_dim", 512)
+        self.class_num = model_params["class_num"]
+        self.parallel_mode = parallel_mode
 
         layer_type = model_params.get("layer_type", "20layer")
         image_size = model_params.get("image_size", 112)
-        self.main_net = self.__main_net(layer_type, self.feature_dim, image_size)
+        if self.parallel_mode == "DataParallel":
+            self.main_net = self.__main_net(layer_type, self.feature_dim, image_size)
+            self.margin_fc = MarginInnerProduct(model_params, parallel_mode, common_dict)
+            self.ce_loss = nn.CrossEntropyLoss(reduce=False)
+        elif self.parallel_mode == "ModelParallel":
+            self.main_net = nn.DataParallel(self.__main_net(layer_type, self.feature_dim, image_size))
+            self.main_net.cuda()
 
-        self.margin_fc = MarginInnerProduct(model_params)
-        self.ce_loss = nn.CrossEntropyLoss(reduce=False)
+            #  split chunk number same as gpu number
+            self.num_chunk_margin_fc = gpu_num
+            self.margin_fc_chunks = nn.ModuleList()
+            start_index = 0
+            for i in range(self.num_chunk_margin_fc):
+                _class_num = self.class_num / self.num_chunk_margin_fc
+                if self.class_num % self.num_chunk_margin_fc > i:
+                    _class_num += 1
+                _model_params = copy.deepcopy(model_params)
+                _model_params["class_num"] = _class_num
+                _model_params["start_label"] = start_index
+                _model_params["end_label"] = start_index + _class_num
+                self.margin_fc_chunks.append(MarginInnerProduct(_model_params,
+                                             parallel_mode, common_dict).cuda(i))
+                start_index += _class_num
+
+            self.ce_loss = nn.DataParallel(nn.CrossEntropyLoss(reduce=False))
+            self.ce_loss.cuda()
 
     def forward(self, x, label):
         x = self.main_net(x)
-        x = self.margin_fc(x, label)
+        if self.parallel_mode == "DataParallel":
+            x = self.margin_fc(x, label)
+        elif self.parallel_mode == "ModelParallel":
+            x_list = []
+            for i in range(self.num_chunk_margin_fc):
+                _x = self.margin_fc_chunks[i](x.cuda(i), label.cuda(i))
+                x_list.append(_x.cuda(0))
+            x = torch.cat(x_list, dim=1)
         x = self.ce_loss(x, label)
         return x
 
@@ -151,5 +209,6 @@ if __name__ == "__main__":
     test = MarginInnerProduct(params)
 
     x = Variable(torch.ones(2, 4).float())
-    label = Variable(torch.ones(2).long())
+    # label = Variable(torch.ones(2).long())
+    label = Variable(torch.FloatTensor([1, 5]))
     print test(x, label)
